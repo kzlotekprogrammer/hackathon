@@ -61,6 +61,8 @@ Szczegóły i uzasadnienia są w `docs/architecture/`. Tu skrót do sprawdzenia 
 - **Handler sam mapuje żądanie.** Konwersja typu na typ to metoda rozszerzająca w klasie `…Converter` wewnątrz folderu funkcji. Metoda wyglądająca na konwersję nie sięga do bazy.
 - **Handler nie przyjmuje `workspaceId` ani `userId`** — bierze je z `CurrentUser`. Zapytania nie filtrują ręcznie po `WorkspaceId`; izolację daje globalny filtr EF.
 - **Handler zapisujący encję workspace'u otwiera transakcję i woła `db.LockWorkspaceAsync(currentUser.WorkspaceId, …)` przed pierwszym odczytem**, a po `SaveChanges` robi commit. Strażnik przy `SaveChanges` odrzuca zapis bez blokady.
+- **Zmiana:** `PATCH` + `Update…Handler` dla niezależnych atrybutów — pola żądania nullowalne, **`null` znaczy „nie zmieniaj”**. `PUT` + `Revise…Handler` (albo `POST /{id}/<czynność>` z domenowym czasownikiem) dla treści sprawdzanej w całości — pola wymagane, brak to 400.
+- **Usuwanie:** encja, na którą coś wskazuje, jest archiwizowana (`Archive…Handler`, status `ARCHIVED`), nie usuwana. Twarde `Delete` ma tylko liść. Gdy zależności blokują czynność, handler sprawdza je sam i odmawia z 409; naruszenia klucza obcego (23503) nie łapiesz — to znak brakującego sprawdzenia.
 - **Czas bierzesz z `IClock`**, nie z `DateTimeOffset.UtcNow`.
 - **Odczyt używany przez kilka handlerów to `…Query` w `Queries/`** — wstrzykiwana klasa, która czyta, a nie rozstrzyga. Odczyt jednego handlera zostaje w tym handlerze.
 - **Każdy handler, zapytanie i serwis rejestrujesz jawnie w `Program.cs`** (`AddScoped<CreateBookingHandler>()`). Bez skanowania assembly.

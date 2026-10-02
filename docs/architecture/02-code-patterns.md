@@ -670,6 +670,181 @@ public sealed class ListBookingsHandler(HackathonDbContext db)
 
 Handler tylko czytający nie otwiera transakcji i nie bierze blokady. Lista jest odczytem jednego handlera, więc zostaje w nim — nie trafia do `Queries/`.
 
+`Features/Bookings/GetBookingHandler.cs`
+
+```csharp
+using Microsoft.EntityFrameworkCore;
+
+namespace Hackathon.Api.Features.Bookings;
+
+public sealed class GetBookingHandler(HackathonDbContext db)
+{
+    public async Task<BookingResponse> HandleAsync(Guid bookingId, CancellationToken cancellationToken)
+    {
+        Booking booking = await db.Bookings
+                .AsNoTracking()
+                .SingleOrDefaultAsync(candidate => candidate.Id == bookingId, cancellationToken)
+            ?? throw new DomainException("The booking does not exist.", StatusCodes.Status404NotFound);
+
+        return booking.ToResponse();
+    }
+}
+```
+
+Rezerwacja innego workspace'u daje to samo 404 co nieistniejąca — filtr izolacji jej nie zwraca.
+
+## Features — zmiana atrybutów (PATCH)
+
+Pola niezależne od siebie zmienia `PATCH`. Wszystkie pola żądania są nullowalne, a **`null` znaczy „nie zmieniaj”** — [`01-structure-conventions.md`](01-structure-conventions.md) · Zmiana i usuwanie.
+
+`Features/Rooms/UpdateRoomRequest.cs`
+
+```csharp
+namespace Hackathon.Api.Features.Rooms;
+
+/// <summary>Only the fields present change.</summary>
+public sealed record UpdateRoomRequest(string? Name, int? Capacity);
+```
+
+`Features/Rooms/UpdateRoomHandler.cs`
+
+```csharp
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+
+namespace Hackathon.Api.Features.Rooms;
+
+public sealed class UpdateRoomHandler(HackathonDbContext db, CurrentUser currentUser, IClock clock)
+{
+    public async Task<RoomResponse> HandleAsync(Guid roomId, UpdateRoomRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        await using IDbContextTransaction databaseTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await db.LockWorkspaceAsync(currentUser.WorkspaceId, cancellationToken);
+
+        Room room = await db.Rooms.SingleOrDefaultAsync(candidate => candidate.Id == roomId, cancellationToken)
+            ?? throw new DomainException("The room does not exist.", StatusCodes.Status404NotFound);
+
+        DateTimeOffset now = clock.UtcNow;
+
+        if (request.Name is not null)
+        {
+            room.Rename(request.Name, now);
+        }
+
+        if (request.Capacity is int capacity)
+        {
+            room.ChangeCapacity(capacity, now);
+        }
+
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            await databaseTransaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (PostgresErrors.IsUniqueViolation(exception))
+        {
+            throw new DomainException("A room with this name already exists.", StatusCodes.Status409Conflict);
+        }
+
+        return room.ToResponse();
+    }
+}
+```
+
+Każde obecne pole idzie przez tę samą metodę encji co przy tworzeniu (`Rename`, `ChangeCapacity`), więc reguła pola jest w jednym miejscu. Pusty string w `Name` nie jest „brakiem” — trafia do `Rename` i dostaje odmowę.
+
+**Pełna treść zamiast pojedynczych pól** — gdy pola zależą od siebie, jak dzień i godziny rezerwacji — to `RescheduleBookingHandler` wyżej: żądanie z kompletem wymaganych pól i jedna metoda encji, która sprawdza je razem. Bez domenowego czasownika ten sam wzorzec nazywa się `PUT /<zasoby>/{id}` + `Revise<Zasób>Handler` ← `Revise<Zasób>Request`.
+
+## Features — archiwizacja z odmową 409
+
+Na salę wskazują rezerwacje, więc sali się nie usuwa — archiwizuje się ją. Warunek „nie ma nadchodzących rezerwacji” zależy od danych spoza encji i potrzebuje go tylko ten handler, więc sprawdza go handler.
+
+`Features/Rooms/ArchiveRoomHandler.cs`
+
+```csharp
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+
+namespace Hackathon.Api.Features.Rooms;
+
+public sealed class ArchiveRoomHandler(HackathonDbContext db, CurrentUser currentUser, IClock clock)
+{
+    public async Task<RoomResponse> HandleAsync(Guid roomId, CancellationToken cancellationToken)
+    {
+        await using IDbContextTransaction databaseTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await db.LockWorkspaceAsync(currentUser.WorkspaceId, cancellationToken);
+
+        Room room = await db.Rooms.SingleOrDefaultAsync(candidate => candidate.Id == roomId, cancellationToken)
+            ?? throw new DomainException("The room does not exist.", StatusCodes.Status404NotFound);
+
+        DateTimeOffset now = clock.UtcNow;
+        await EnsureNoUpcomingBookingsAsync(room, now, cancellationToken);
+        room.Archive(now);
+
+        await db.SaveChangesAsync(cancellationToken);
+        await databaseTransaction.CommitAsync(cancellationToken);
+
+        return room.ToResponse();
+    }
+
+    /// <summary>
+    /// Past bookings stay with the archived room as history; an upcoming one would hold a slot in a room
+    /// nobody can book any more.
+    /// </summary>
+    private async Task EnsureNoUpcomingBookingsAsync(Room room, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // The business date in UTC; a product with a time zone setting takes today from it.
+        DateOnly today = DateOnly.FromDateTime(now.UtcDateTime);
+
+        bool hasUpcomingBookings = await db.Bookings
+            .Where(Booking.HoldsSlot)
+            .AnyAsync(booking => booking.RoomId == room.Id && booking.Day >= today, cancellationToken);
+
+        if (hasUpcomingBookings)
+        {
+            throw new DomainException(
+                "The room has upcoming bookings. Cancel or move them before archiving the room.",
+                StatusCodes.Status409Conflict);
+        }
+    }
+}
+```
+
+Sprawdzenie stoi po blokadzie workspace'u, więc między nim a zapisem nikt nie doda rezerwacji. Dlatego naruszenia klucza obcego nigdzie nie łapiemy: gdyby wystąpiło, znaczyłoby, że handler zapomniał sprawdzić zależności, i ma wyjść jako 500 w teście.
+
+## Features — usunięcie liścia
+
+`Features/Bookings/DeleteBookingHandler.cs`
+
+```csharp
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+
+namespace Hackathon.Api.Features.Bookings;
+
+public sealed class DeleteBookingHandler(HackathonDbContext db, CurrentUser currentUser)
+{
+    /// <summary>
+    /// Nothing points at a booking, so it is removed outright — for one entered by mistake. Cancelling keeps it
+    /// as history instead.
+    /// </summary>
+    public async Task HandleAsync(Guid bookingId, CancellationToken cancellationToken)
+    {
+        await using IDbContextTransaction databaseTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await db.LockWorkspaceAsync(currentUser.WorkspaceId, cancellationToken);
+
+        Booking booking = await db.Bookings.SingleOrDefaultAsync(candidate => candidate.Id == bookingId, cancellationToken)
+            ?? throw new DomainException("The booking does not exist.", StatusCodes.Status404NotFound);
+
+        db.Bookings.Remove(booking);
+        await db.SaveChangesAsync(cancellationToken);
+        await databaseTransaction.CommitAsync(cancellationToken);
+    }
+}
+```
+
 ## Features — kontroler
 
 `Features/Bookings/BookingsController.cs`
@@ -687,6 +862,8 @@ public sealed class BookingsController(
     CreateBookingHandler create,
     RescheduleBookingHandler reschedule,
     CancelBookingHandler cancel,
+    DeleteBookingHandler delete,
+    GetBookingHandler get,
     ListBookingsHandler list) : ControllerBase
 {
     [HttpGet]
@@ -695,6 +872,12 @@ public sealed class BookingsController(
         CancellationToken cancellationToken)
     {
         return list.HandleAsync(request, cancellationToken);
+    }
+
+    [HttpGet("{bookingId:guid}")]
+    public Task<BookingResponse> GetById(Guid bookingId, CancellationToken cancellationToken)
+    {
+        return get.HandleAsync(bookingId, cancellationToken);
     }
 
     [HttpPost]
@@ -721,17 +904,67 @@ public sealed class BookingsController(
     {
         return cancel.HandleAsync(bookingId, cancellationToken);
     }
+
+    [HttpDelete("{bookingId:guid}")]
+    public async Task<IActionResult> Delete(Guid bookingId, CancellationToken cancellationToken)
+    {
+        await delete.HandleAsync(bookingId, cancellationToken);
+
+        return NoContent();
+    }
 }
 ```
 
-| Czynność | HTTP | Odpowiedź |
-|---|---|---|
-| Lista | `GET /<zasoby>` z filtrami w query | 200 + tablica |
-| Szczegóły | `GET /<zasoby>/{id}` | 200 / 404 |
-| Utworzenie | `POST /<zasoby>` | 201 + obiekt |
-| Edycja pól | `PATCH /<zasoby>/{id}` | 200 + obiekt |
-| Czynność domenowa | `POST /<zasoby>/{id}/<czynność>` | 200 + obiekt |
-| Usunięcie | `DELETE /<zasoby>/{id}` | 204 |
+`Features/Rooms/RoomsController.cs`
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+
+namespace Hackathon.Api.Features.Rooms;
+
+[ApiController]
+[Authorize]
+[Route("rooms")]
+public sealed class RoomsController(
+    CreateRoomHandler create,
+    UpdateRoomHandler update,
+    ArchiveRoomHandler archive) : ControllerBase
+{
+    [HttpPost]
+    public async Task<ActionResult<RoomResponse>> Post(
+        [FromBody] CreateRoomRequest request,
+        CancellationToken cancellationToken)
+    {
+        RoomResponse room = await create.HandleAsync(request, cancellationToken);
+
+        return Created($"/rooms/{room.Id}", room);
+    }
+
+    [HttpPatch("{roomId:guid}")]
+    public Task<RoomResponse> Patch(Guid roomId, [FromBody] UpdateRoomRequest request, CancellationToken cancellationToken)
+    {
+        return update.HandleAsync(roomId, request, cancellationToken);
+    }
+
+    [HttpPost("{roomId:guid}/archive")]
+    public Task<RoomResponse> Archive(Guid roomId, CancellationToken cancellationToken)
+    {
+        return archive.HandleAsync(roomId, cancellationToken);
+    }
+}
+```
+
+| Czynność | HTTP | Handler | Odpowiedź |
+|---|---|---|---|
+| Lista | `GET /<zasoby>` z filtrami w query | `List…` | 200 + tablica |
+| Szczegóły | `GET /<zasoby>/{id}` | `Get…` | 200 / 404 |
+| Utworzenie | `POST /<zasoby>` | `Create…` | 201 + obiekt |
+| Zmiana niezależnych pól | `PATCH /<zasoby>/{id}` — `null` = bez zmian | `Update…` | 200 + obiekt |
+| Podmiana całej treści | `PUT /<zasoby>/{id}` — pola wymagane | `Revise…` | 200 + obiekt |
+| Czynność domenowa | `POST /<zasoby>/{id}/<czynność>` | `Cancel…`, `Reschedule…` | 200 + obiekt |
+| Archiwizacja (coś na encję wskazuje) | `POST /<zasoby>/{id}/archive` | `Archive…` | 200 + obiekt / 409 |
+| Usunięcie (liść) | `DELETE /<zasoby>/{id}` | `Delete…` | 204 / 409 |
 
 Handler bez treści żądania (szczegóły, usunięcie, czynność bez danych) przyjmuje tylko parametry trasy. `CancelBookingHandler` wygląda jak `RescheduleBookingHandler` bez żądania i bez `RoomScheduleQuery`: transakcja, blokada, wczytanie (404), `booking.Cancel(clock.UtcNow)`, zapis, commit.
 
@@ -740,10 +973,16 @@ Handler bez treści żądania (szczegóły, usunięcie, czynność bez danych) p
 Każdy nowy handler i zapytanie rejestrujesz jawnie, w bloku swojego zasobu:
 
 ```csharp
+builder.Services.AddScoped<CreateRoomHandler>();
+builder.Services.AddScoped<UpdateRoomHandler>();
+builder.Services.AddScoped<ArchiveRoomHandler>();
+
 builder.Services.AddScoped<RoomScheduleQuery>();
 builder.Services.AddScoped<CreateBookingHandler>();
 builder.Services.AddScoped<RescheduleBookingHandler>();
 builder.Services.AddScoped<CancelBookingHandler>();
+builder.Services.AddScoped<DeleteBookingHandler>();
+builder.Services.AddScoped<GetBookingHandler>();
 builder.Services.AddScoped<ListBookingsHandler>();
 ```
 
@@ -869,6 +1108,57 @@ public sealed class BookingApiTests(PostgresFixture postgres)
         RoomResponse? room = await response.Content.ReadFromJsonAsync<RoomResponse>();
 
         return room!.Id;
+    }
+}
+```
+
+`tests/Hackathon.Tests/Features/Rooms/RoomApiTests.cs`
+
+```csharp
+using System.Net;
+using System.Net.Http.Json;
+using Hackathon.Api.Features.Bookings;
+using Hackathon.Api.Features.Rooms;
+
+namespace Hackathon.Tests;
+
+[Collection(PostgresCollection.Name)]
+public sealed class RoomApiTests(PostgresFixture postgres)
+{
+    [Fact]
+    public async Task A_field_left_out_of_a_patch_stays_as_it_is()
+    {
+        HttpClient client = await TestApi.SignedInAsync(postgres, "room-patch@example.com");
+        HttpResponseMessage created = await client.PostAsJsonAsync("/rooms", new CreateRoomRequest("Room A", 8));
+        RoomResponse? room = await created.Content.ReadFromJsonAsync<RoomResponse>();
+
+        HttpResponseMessage renamed = await client.PatchAsJsonAsync($"/rooms/{room!.Id}", new UpdateRoomRequest("Room B", null));
+        RoomResponse? changed = await renamed.Content.ReadFromJsonAsync<RoomResponse>();
+
+        Assert.Equal(HttpStatusCode.OK, renamed.StatusCode);
+        Assert.Equal("Room B", changed!.Name);
+        Assert.Equal(8, changed.Capacity);
+    }
+
+    [Fact]
+    public async Task A_room_with_an_upcoming_booking_is_archived_only_after_the_booking_is_cancelled()
+    {
+        HttpClient client = await TestApi.SignedInAsync(postgres, "room-archive@example.com");
+        HttpResponseMessage created = await client.PostAsJsonAsync("/rooms", new CreateRoomRequest("Room A", 8));
+        RoomResponse? room = await created.Content.ReadFromJsonAsync<RoomResponse>();
+        DateOnly nextWeek = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(7);
+        HttpResponseMessage booked = await client.PostAsJsonAsync(
+            "/bookings",
+            new CreateBookingRequest(room!.Id, nextWeek, new TimeOnly(9, 0), new TimeOnly(10, 0)));
+        BookingResponse? booking = await booked.Content.ReadFromJsonAsync<BookingResponse>();
+
+        HttpResponseMessage refused = await client.PostAsync($"/rooms/{room.Id}/archive", null);
+        HttpResponseMessage cancelled = await client.PostAsync($"/bookings/{booking!.Id}/cancel", null);
+        HttpResponseMessage archived = await client.PostAsync($"/rooms/{room.Id}/archive", null);
+
+        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, cancelled.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, archived.StatusCode);
     }
 }
 ```

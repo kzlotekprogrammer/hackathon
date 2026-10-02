@@ -92,12 +92,12 @@ Pliki w folderze funkcji:
 | Plik | Nazwa |
 |---|---|
 | Kontroler | `<Zasób w l. mn.>Controller` — `BookingsController` |
-| Handler | `<Czynność><Zasób>Handler` — `CreateBookingHandler`, `ListBookingsHandler`, `GetBookingHandler`, `UpdateRoomHandler`, `CancelBookingHandler`, `DeleteRoomHandler` |
+| Handler | `<Czynność><Zasób>Handler` — `CreateBookingHandler`, `ListBookingsHandler`, `GetBookingHandler`, `UpdateRoomHandler`, `ArchiveRoomHandler`, `CancelBookingHandler`, `DeleteBookingHandler` |
 | Żądanie | nazwa handlera z `Request` zamiast `Handler` — `CreateBookingRequest` |
 | Odpowiedź | `<Zasób>Response` — `BookingResponse`; wspólna dla handlerów zasobu |
 | Konwerter | `<Zasób>Converter` — klasa statyczna z metodami rozszerzającymi `ToResponse()` |
 
-Czasowniki: `Create`, `Get`, `List`, `Update`, `Delete` plus czasowniki domenowe, gdy czynność nie jest zwykłą edycją (`Archive`, `Cancel`, `Reschedule`, `Approve`).
+Czasowniki: `Create`, `Get`, `List`, `Update` (PATCH), `Revise` (PUT), `Archive`, `Delete` plus czasowniki domenowe, gdy czynność nie jest zwykłą edycją (`Cancel`, `Reschedule`, `Approve`). Różnicę między `Update`, `Revise`, `Archive` i `Delete` opisuje „Zmiana i usuwanie” niżej.
 
 ### Handler, żądanie, konwersja
 
@@ -110,6 +110,28 @@ Czasowniki: `Create`, `Get`, `List`, `Update`, `Delete` plus czasowniki domenowe
 - **Zapytania nie filtrują ręcznie po `WorkspaceId`.** Ręczny warunek dublowałby filtr i sugerował, że bez niego dane wyciekną. Po identyfikatorze czyta się tylko encje bez filtra (`Workspace`, `User`) i kod działający przed zalogowaniem.
 - **Handler czyta się bez skakania po plikach.** Wczytanie i zapis piszemy w każdym handlerze, nawet kosztem powtórzeń; handler nie woła innego handlera. Zduplikowane reguły biznesowe — nie; zduplikowane „wczytaj/zapisz” — tak.
 - **`HandleAsync` czyta się jak spis kroków.** Długi, zamknięty blok (sprawdzenie warunków przed zapisem, zmiana kilku pól naraz) trafia do prywatnej metody tego samego handlera nazwanej tym, co robi (`EnsureNoOverlapAsync`, `ApplyChanges`). Pojedynczego wywołania nie opakowujesz w metodę.
+
+### Zmiana i usuwanie
+
+**Zmiana — dwa wzorce, wybierane po tym, czy pola zależą od siebie.**
+
+| | `PATCH` + `Update…Handler` | `PUT` + `Revise…Handler` |
+|---|---|---|
+| Kiedy | niezależne atrybuty: nazwa, flagi, pojemność, kolejność | treść, którą trzeba sprawdzić w całości: pola zależą od siebie (dzień i godziny, kwota i waluta) |
+| Żądanie | **wszystkie pola nullowalne**; komentarz `/// Only the fields present change.` | pełna treść jak przy `Create`; pola wymagane — brak to odmowa 400 |
+| `null` w polu | **„nie zmieniaj”** | błąd — handler odrzuca brak |
+| Handler | dla każdego obecnego pola woła metodę encji: `if (request.Name is not null) { room.Rename(request.Name, now); }` | woła jedną metodę encji z całą nową treścią, która sprawdza ją razem |
+
+- **PATCH nie czyści pola do `null`.** Jeśli produkt potrzebuje wyczyszczenia wartości, to jest osobna czynność (`POST /<zasoby>/{id}/clear-<pole>`) albo PUT. Nie wprowadzamy pól-flag „czy pole przyszło” ani `JsonPatchDocument`.
+- **Czynność z domenowym czasownikiem** (np. przesunięcie rezerwacji) wystawiamy jako `POST /<zasoby>/{id}/<czynność>` z pełną treścią tej czynności — to ten sam wzorzec co PUT, tylko z nazwą, którą zna użytkownik (`RescheduleBookingHandler`). `PUT /<zasoby>/{id}` + `Revise…` zostaje dla zasobu, którego zmiany nie da się nazwać jednym czasownikiem.
+
+**Usuwanie — o wzorcu decyduje to, czy coś wskazuje na encję.**
+
+- **Encja, na którą wskazują inne encje, nie jest usuwana — jest archiwizowana.** Ma status (`ACTIVE` / `ARCHIVED`) i metodę `Archive`; zarchiwizowana nie przyjmuje nowych powiązań, a stare zostają z historią. Endpoint `POST /<zasoby>/{id}/archive`, handler `Archive…Handler`. Przykład: sala, do której są rezerwacje — nie ma `DeleteRoomHandler`.
+- **Twarde `Delete` ma tylko liść** — encja, na którą nic nie wskazuje (`DeleteBookingHandler`). `DELETE /<zasoby>/{id}`, 204.
+- **Gdy reguła blokuje archiwizację albo usunięcie, handler sam sprawdza zależności i odmawia z 409**, mówiąc, co zrobić najpierw: „The room has upcoming bookings. Cancel or move them before archiving the room.” Sprawdzenie leży w prywatnej metodzie handlera (`EnsureNoUpcomingBookingsAsync`), a jeśli potrzebuje go kilka handlerów — w typie reguły w `Domain/`.
+- **Naruszenia klucza obcego (23503) nie łapiemy.** Handler bierze blokadę workspace'u przed sprawdzeniem, więc między sprawdzeniem a zapisem nikt nie doda powiązania. Błąd FK oznacza, że handler zapomniał sprawdzić — to błąd programisty i ma wyjść jako 500 w teście, a nie zostać zamaskowany jako 409. Inaczej niż unikalność (23505): tę łapiemy i zamieniamy na 409, bo indeks unikalny **jest** sprawdzeniem — handler nie odpytuje wcześniej, czy nazwa jest wolna.
+- Klucze obce mają `DeleteBehavior.Restrict` — baza nie kasuje kaskadowo niczego za handlerem.
 
 ### Styl C#, którego pilnujemy
 
@@ -146,7 +168,7 @@ await databaseTransaction.CommitAsync(cancellationToken);
 - **O blokadzie decyduje to, co handler zapisuje**, nie metoda HTTP. Handler tylko czytający nie bierze blokady. Handler zapisujący wyłącznie encje spoza workspace'u (użytkownik przy logowaniu) też nie.
 - **Rejestracja blokuje workspace, który właśnie tworzy** — jego identyfikator jest znany przed zapisem.
 - **Strażnik zapisu** (interceptor `SaveChanges` w `Persistence/`) odrzuca zapis encji workspace'u, jeżeli bieżąca transakcja nie trzyma blokady tego samego workspace'u. Brakująca blokada wychodzi w pierwszym teście handlera.
-- **Unikalność łapana w bazie zamienia się na 409**: `catch (DbUpdateException exception) when (PostgresErrors.IsUniqueViolation(exception))`.
+- **Unikalność łapana w bazie zamienia się na 409**: `catch (DbUpdateException exception) when (PostgresErrors.IsUniqueViolation(exception))`. Naruszenia klucza obcego nie łapiemy — patrz „Zmiana i usuwanie”.
 
 **Odrzucone:** izolacja `SERIALIZABLE` (wymaga ponawiania), blokada w pamięci procesu (nie działa przy kilku instancjach), wersja wiersza (równoczesny zapis kończy się błędem zamiast poczekać), dekorator wokół handlerów, który brałby blokadę niewidocznie dla czytającego.
 
