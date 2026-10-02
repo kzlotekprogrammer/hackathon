@@ -1,0 +1,43 @@
+root = true
+
+[*.cs]
+# `var` only where the type is visible on the same line (new, cast, `as`, factory of the same type).
+# Everywhere else — method results, foreach, out variables, literals — the type is written out.
+csharp_style_var_when_type_is_apparent = true:silent
+csharp_style_var_for_built_in_types = false:error
+csharp_style_var_elsewhere = false:error
+dotnet_diagnostic.IDE0008.severity = error
+# An explicit type where `var` would be allowed is fine too; nothing forces `var`.
+dotnet_diagnostic.IDE0007.severity = none
+# Methods, constructors, operators and local functions have a block body, even one-liners.
+# Computed read-only properties and lambdas keep `=>`.
+csharp_style_expression_bodied_methods = false:error
+csharp_style_expression_bodied_constructors = false:error
+csharp_style_expression_bodied_operators = false:error
+csharp_style_expression_bodied_local_functions = false:error
+dotnet_diagnostic.IDE0021.severity = error
+dotnet_diagnostic.IDE0022.severity = error
+dotnet_diagnostic.IDE0023.severity = error
+dotnet_diagnostic.IDE0024.severity = error
+dotnet_diagnostic.IDE0061.severity = error
+# Braces on every if, else, for, foreach, while and using.
+csharp_prefer_braces = true:error
+dotnet_diagnostic.IDE0011.severity = error
+
+[src/Hackathon.Api/Migrations/*.cs]
+generated_code = true
+
+[*.cs]
+# One type per file, and the file carries its name. A helper used only by one class stays inside it as a
+# private nested type, which the compiler keeps from being used anywhere else.
+dotnet_analyzer_diagnostic.category-StyleCop.CSharp.SpacingRules.severity = none
+dotnet_analyzer_diagnostic.category-StyleCop.CSharp.ReadabilityRules.severity = none
+dotnet_analyzer_diagnostic.category-StyleCop.CSharp.OrderingRules.severity = none
+dotnet_analyzer_diagnostic.category-StyleCop.CSharp.NamingRules.severity = none
+dotnet_analyzer_diagnostic.category-StyleCop.CSharp.MaintainabilityRules.severity = none
+dotnet_analyzer_diagnostic.category-StyleCop.CSharp.LayoutRules.severity = none
+dotnet_analyzer_diagnostic.category-StyleCop.CSharp.DocumentationRules.severity = none
+dotnet_analyzer_diagnostic.category-StyleCop.CSharp.SpecialRules.severity = none
+dotnet_diagnostic.SA1402.severity = error
+dotnet_diagnostic.SA1649.severity = error
+dotnet_diagnostic.SA0001.severity = none

@@ -1,0 +1,23 @@
+name: hackathon
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: hackathon-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hackathon
+      POSTGRES_USER: hackathon
+      POSTGRES_PASSWORD: hackathon
+    ports:
+      - "5432:5432"
+    volumes:
+      - hackathon-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hackathon -d hackathon"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  hackathon-postgres-data:

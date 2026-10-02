@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup>
+    <!-- Code-style rules from .editorconfig are checked by dotnet build, not only by the IDE. -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Only SA1402 and SA1649 are switched on in .editorconfig: one type per file, named after it. -->
+    <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-beta.556" PrivateAssets="all" />
+  </ItemGroup>
+</Project>
