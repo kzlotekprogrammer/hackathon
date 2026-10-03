@@ -4,13 +4,13 @@
 
 ```
 <repo>/
-├── AGENTS.md, CLAUDE.md
+├── AGENTS.md, CLAUDE.md, .gitignore
 ├── docs/
 │   ├── product.md             co budujemy — źródło prawdy
 │   ├── assumptions.md         założenia agenta do weryfikacji
 │   └── architecture/          jak budujemy — rozstrzygnięte
 └── backend/
-    ├── .editorconfig, Directory.Build.props, docker-compose.yml, dotnet-tools.json
+    ├── .editorconfig, Directory.Build.props, docker-compose.yml, dotnet-tools.json, global.json
     ├── src/Hackathon.Api/
     └── tests/Hackathon.Tests/
 ```

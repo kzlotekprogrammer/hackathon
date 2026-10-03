@@ -5,7 +5,7 @@ Decyzje obowiązujące. Nie są propozycją i nie wymagają potwierdzenia przed 
 | Warstwa | Wybór |
 |---|---|
 | Baza danych | **PostgreSQL 17** (obraz `postgres:17`) |
-| Backend | **.NET 10**, C#, `Nullable` i `ImplicitUsings` włączone |
+| Backend | **.NET 10**, C#, `Nullable` i `ImplicitUsings` włączone; SDK przypięty do 10.0.x w `backend/global.json` |
 | ORM i migracje | **EF Core** + `Npgsql.EntityFrameworkCore.PostgreSQL`; narzędzie `dotnet-ef` lokalnie w `backend/dotnet-tools.json` |
 | API | **REST — kontrolery**, nie Minimal API |
 | Testy | **xUnit**; testy integracyjne na prawdziwym PostgreSQL przez **Testcontainers**; granice architektury przez **NetArchTest** |

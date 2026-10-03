@@ -12,6 +12,7 @@ backend/
 ├── Directory.Build.props         ← plik gotowy w tym zestawie
 ├── docker-compose.yml            ← plik gotowy w tym zestawie
 ├── dotnet-tools.json             ← plik gotowy w tym zestawie (dotnet-ef)
+├── global.json                   ← plik gotowy w tym zestawie (SDK .NET 10.0, najnowsze dostępne pasmo)
 ├── Hackathon.slnx
 ├── src/Hackathon.Api/Hackathon.Api.csproj
 └── tests/Hackathon.Tests/Hackathon.Tests.csproj
